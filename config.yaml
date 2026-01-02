@@ -1,0 +1,4 @@
+# InvokeAI Cleanup Configuration
+
+# Path to InvokeAI data directory (contains invokeai.db and models folder)
+invokeai_data_path: /mnt/llm/hub/invokeai_data
