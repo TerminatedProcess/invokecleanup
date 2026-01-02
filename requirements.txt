@@ -1,3 +1,5 @@
 # InvokeAI Cleanup Dependencies
 streamlit
 pyyaml
+streamlit-aggrid
+pyperclip
