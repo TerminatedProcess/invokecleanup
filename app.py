@@ -88,13 +88,18 @@ def get_file_size(file_path: Path) -> int:
 
 def extract_hash_from_path(path: str) -> str:
     """Extract hash/UUID from model path"""
-    # InvokeAI stores models in folders named by their UUID
-    # Example: /path/to/models/e3e73746-d2b6-4a26-b775-aeb4e945d0a3/model.safetensors
-    # The UUID is the parent directory name
+    # InvokeAI stores models in two formats:
+    # 1. File path: uuid/model.safetensors (ControlNets, LoRAs)
+    # 2. Folder path: uuid (diffusers-format main models)
     path_obj = Path(path)
 
-    # Get parent directory name (should be the UUID)
-    hash_value = path_obj.parent.name
+    # Check if path looks like a file (has extension) or folder
+    if path_obj.suffix:
+        # File path - UUID is the parent directory
+        hash_value = path_obj.parent.name
+    else:
+        # Folder path - UUID is the path itself (last component)
+        hash_value = path_obj.name
 
     # If it looks like a UUID or hash (allows alphanumeric and hyphens)
     if len(hash_value) > 8 and all(c.isalnum() or c == '-' for c in hash_value):
@@ -131,16 +136,23 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Query all models
-    cursor.execute("SELECT id, type, path, name FROM models")
+    # Query all models with hash for duplicate detection
+    cursor.execute("SELECT id, type, path, name, hash FROM models")
     rows = cursor.fetchall()
 
     # Scan the models folder
     models_on_disk = scan_models_folder(models_path)
 
+    # Build hash map for duplicate detection
+    hash_counts = {}
+    for row in rows:
+        model_hash = row[4] if len(row) > 4 else None
+        if model_hash:
+            hash_counts[model_hash] = hash_counts.get(model_hash, 0) + 1
+
     models = []
     for row in rows:
-        model_id, model_type, model_path, model_name = row
+        model_id, model_type, model_path, model_name, model_hash = row
 
         # Handle both absolute and relative paths
         path_obj = Path(model_path)
@@ -154,14 +166,18 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
         # Check if it's a symbolic link
         is_symlink = path_obj.is_symlink() if path_obj.exists() else False
 
-        # Check if file exists (in-place)
-        in_place = path_obj.exists() and path_obj.is_file()
+        # Check if model exists (in-place)
+        # Could be a file (ControlNet, LoRA) or folder (diffusers main model)
+        in_place = path_obj.exists() and (path_obj.is_file() or path_obj.is_dir())
 
         # Check if it's a git-lfs pointer
         is_lfs_pointer = is_git_lfs_pointer(path_obj)
 
         # Extract hash (UUID) from path
         hash_value = extract_hash_from_path(model_path)
+
+        # Check if this is a duplicate (same content hash as another model)
+        is_duplicate = model_hash and hash_counts.get(model_hash, 0) > 1
 
         models.append({
             'id': model_id,
@@ -171,11 +187,13 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
             'size': file_size,
             'size_formatted': format_size(file_size),
             'hash': hash_value,
+            'content_hash': model_hash,  # BLAKE3 hash for duplicate detection
             'in_place': in_place,
             'symlink': is_symlink,
             'git_lfs': is_lfs_pointer,
             'in_db': True,
-            'on_disk': hash_value in models_on_disk
+            'on_disk': hash_value in models_on_disk,
+            'is_duplicate': is_duplicate
         })
 
         # Remove from disk dict so we can find orphans later
@@ -198,11 +216,13 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
             'size': file_size,
             'size_formatted': format_size(file_size),
             'hash': uuid,
+            'content_hash': None,
             'in_place': True,
             'symlink': is_symlink,
             'git_lfs': is_lfs_pointer,
             'in_db': False,
-            'on_disk': True
+            'on_disk': True,
+            'is_duplicate': False
         })
 
     return models
@@ -235,10 +255,11 @@ def main():
     missing_files = sum(1 for m in models if m['in_db'] and not m['in_place'] and not m['git_lfs'])
     orphaned_files = sum(1 for m in models if not m['in_db'])
     lfs_pointers = sum(1 for m in models if m['git_lfs'])
-    ok_models = sum(1 for m in models if m['in_db'] and m['in_place'] and not m['git_lfs'])
+    duplicate_models = sum(1 for m in models if m['is_duplicate'])
+    ok_models = sum(1 for m in models if m['in_db'] and m['in_place'] and not m['git_lfs'] and not m['is_duplicate'])
 
     # Display compact summary with clickable buttons
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
 
     with col1:
         if st.button(f"📊 Total\n{total_models}", use_container_width=True, type="primary" if st.session_state.filter == 'total' else "secondary"):
@@ -260,16 +281,22 @@ def main():
         if st.button(f"⚠️ LFS\n{lfs_pointers}", use_container_width=True, type="primary" if st.session_state.filter == 'lfs' else "secondary"):
             st.session_state.filter = 'lfs'
             st.rerun()
+    with col6:
+        if st.button(f"🔄 Duplicates\n{duplicate_models}", use_container_width=True, type="primary" if st.session_state.filter == 'duplicates' else "secondary"):
+            st.session_state.filter = 'duplicates'
+            st.rerun()
 
     # Filter models based on selected filter
     if st.session_state.filter == 'ok':
-        filtered_models = [m for m in models if m['in_db'] and m['in_place'] and not m['git_lfs']]
+        filtered_models = [m for m in models if m['in_db'] and m['in_place'] and not m['git_lfs'] and not m['is_duplicate']]
     elif st.session_state.filter == 'missing':
         filtered_models = [m for m in models if m['in_db'] and not m['in_place'] and not m['git_lfs']]
     elif st.session_state.filter == 'orphaned':
         filtered_models = [m for m in models if not m['in_db']]
     elif st.session_state.filter == 'lfs':
         filtered_models = [m for m in models if m['git_lfs']]
+    elif st.session_state.filter == 'duplicates':
+        filtered_models = [m for m in models if m['is_duplicate']]
     else:  # total
         filtered_models = models
 
@@ -291,44 +318,46 @@ def main():
         name = model['name']
         if not model['in_db']:
             name = f"🗑️ {name}"
+        elif model['is_duplicate']:
+            name = f"🔄 {name}"
 
-        # Determine status - check LFS first since pointer files technically exist
-        if not model['in_db']:
-            status = "⚠️ Not in DB"
-        elif model['git_lfs']:
-            status = "⚠️ LFS Pointer"
-        elif model['in_place']:
-            # File exists at the path (either in-place or in models folder)
-            status = "✅ OK"
-        elif not model['on_disk']:
-            # File doesn't exist and no corresponding folder
-            status = "❌ Missing"
+        # UUID (folder hash) - full value or "In-place" for external models
+        uuid_display = model['hash'] if model['hash'] != 'N/A' else 'In-place'
+
+        # BLAKE3 content hash - remove 'blake3:' prefix, show full hash
+        content_hash = model.get('content_hash', '')
+        if content_hash and content_hash.startswith('blake3:'):
+            blake3_display = content_hash[7:]  # Remove 'blake3:' prefix
         else:
-            status = "⚠️ Check"
-
-        symlink = "🔗" if model['symlink'] else "📄"
-        lfs = "⚠️" if model['git_lfs'] else "✅"
-
-        # Truncate hash
-        hash_display = model['hash'][:12] + "..." if len(model['hash']) > 15 else model['hash']
+            blake3_display = "N/A"
 
         table_data.append({
             'Model': name,
             'Size': model['size_formatted'],
-            'Hash': hash_display,
-            'Status': status,
-            'Type': symlink,
-            'LFS': lfs,
-            '_model_name': model['name']  # Hidden column for copying
+            'UUID': uuid_display,
+            'BLAKE3': blake3_display,
+            '_model_name': model['name'],  # Hidden column for copying
+            '_size_bytes': model['size']  # Hidden column for proper sorting
         })
 
     df = pd.DataFrame(table_data)
+
+    # Sort by size (largest first) for initial display
+    df = df.sort_values('_size_bytes', ascending=False)
 
     # Configure AgGrid
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_selection(selection_mode='single', use_checkbox=False)
     gb.configure_grid_options(domLayout='normal', rowHeight=35)
     gb.configure_column('_model_name', hide=True)  # Hide the copy helper column
+    gb.configure_column('_size_bytes', hide=True)  # Hide the numeric size column
+
+    # Configure columns
+    gb.configure_column('Model', sortable=True, minWidth=200)
+    gb.configure_column('Size', sortable=True, width=100)
+    gb.configure_column('UUID', sortable=True, width=200)
+    gb.configure_column('BLAKE3', sortable=True, width=200)
+
     gridOptions = gb.build()
 
     # Display grid
