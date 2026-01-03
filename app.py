@@ -274,7 +274,7 @@ def main():
 
     # Display models with AgGrid for better interaction
     import pandas as pd
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+    from st_aggrid import AgGrid, GridOptionsBuilder
     import pyperclip
 
     # Prepare data for table
@@ -285,8 +285,11 @@ def main():
         if not model['in_db']:
             name = f"🗑️ {name}"
 
+        # Determine status - check LFS first since pointer files technically exist
         if not model['in_db']:
             status = "⚠️ Not in DB"
+        elif model['git_lfs']:
+            status = "⚠️ LFS Pointer"
         elif not model['on_disk']:
             status = "❌ Missing"
         elif model['in_place']:
@@ -313,16 +316,17 @@ def main():
     df = pd.DataFrame(table_data)
 
     # Configure AgGrid
-    gb = GridOptionsBuilder.from_dataframe(df[['Model', 'Size', 'Hash', 'Status', 'Type', 'LFS']])
+    gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_selection(selection_mode='single', use_checkbox=False)
     gb.configure_grid_options(domLayout='normal', rowHeight=35)
+    gb.configure_column('_model_name', hide=True)  # Hide the copy helper column
     gridOptions = gb.build()
 
     # Display grid
     grid_response = AgGrid(
-        df[['Model', 'Size', 'Hash', 'Status', 'Type', 'LFS']],
+        df,
         gridOptions=gridOptions,
-        update_mode=GridUpdateMode.SELECTION_CHANGED,
+        update_on=['selectionChanged'],
         height=650,
         theme='streamlit',
         enable_enterprise_modules=False,
@@ -330,14 +334,15 @@ def main():
     )
 
     # Handle row selection and copy to clipboard
-    if grid_response['selected_rows'] is not None and len(grid_response['selected_rows']) > 0:
-        selected_idx = grid_response['selected_rows'][0]['_selectedRowNodeInfo']['nodeRowIndex']
-        model_name = table_data[selected_idx]['_model_name']
-        try:
-            pyperclip.copy(model_name)
-            st.toast("✓ Copied", icon="✅")
-        except:
-            st.toast(f"Copied: {model_name}", icon="✅")
+    if grid_response['selected_rows'] is not None:
+        selected_df = pd.DataFrame(grid_response['selected_rows'])
+        if len(selected_df) > 0:
+            model_name = selected_df.iloc[0]['_model_name']
+            try:
+                pyperclip.copy(model_name)
+                st.toast("✓ Copied", icon="✅")
+            except Exception as e:
+                st.toast(f"Copied: {model_name}", icon="✅")
 
 
 if __name__ == "__main__":
