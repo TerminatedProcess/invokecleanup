@@ -107,18 +107,21 @@ def scan_models_folder(models_path: Path) -> Dict[str, Path]:
     """Scan the models folder and return a dict of {uuid: file_path}"""
     models_on_disk = {}
 
+    # Valid model file extensions
+    MODEL_EXTENSIONS = {'.safetensors', '.pth', '.pt', '.gguf'}
+
     if not models_path.exists():
         return models_on_disk
 
     # Each model is in a UUID-named folder
     for uuid_folder in models_path.iterdir():
         if uuid_folder.is_dir():
-            # Find model files in this folder (safetensors, ckpt, etc.)
+            # Find model files in this folder (only valid extensions)
             for model_file in uuid_folder.iterdir():
-                if model_file.is_file():
+                if model_file.is_file() and model_file.suffix.lower() in MODEL_EXTENSIONS:
                     # Store the UUID and the file path
                     models_on_disk[uuid_folder.name] = model_file
-                    break  # Only take the first file per folder
+                    break  # Only take the first model file per folder
 
     return models_on_disk
 
@@ -139,7 +142,11 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
     for row in rows:
         model_id, model_type, model_path, model_name = row
 
+        # Handle both absolute and relative paths
         path_obj = Path(model_path)
+        if not path_obj.is_absolute():
+            # Relative path - prepend models folder
+            path_obj = models_path / model_path
 
         # Get file size
         file_size = get_file_size(path_obj)
@@ -225,10 +232,10 @@ def main():
 
     # Calculate statistics
     total_models = len(models)
-    missing_files = sum(1 for m in models if m['in_db'] and not m['on_disk'])
+    missing_files = sum(1 for m in models if m['in_db'] and not m['in_place'] and not m['git_lfs'])
     orphaned_files = sum(1 for m in models if not m['in_db'])
     lfs_pointers = sum(1 for m in models if m['git_lfs'])
-    ok_models = sum(1 for m in models if m['in_db'] and m['on_disk'] and not m['git_lfs'])
+    ok_models = sum(1 for m in models if m['in_db'] and m['in_place'] and not m['git_lfs'])
 
     # Display compact summary with clickable buttons
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -256,9 +263,9 @@ def main():
 
     # Filter models based on selected filter
     if st.session_state.filter == 'ok':
-        filtered_models = [m for m in models if m['in_db'] and m['on_disk'] and not m['git_lfs']]
+        filtered_models = [m for m in models if m['in_db'] and m['in_place'] and not m['git_lfs']]
     elif st.session_state.filter == 'missing':
-        filtered_models = [m for m in models if m['in_db'] and not m['on_disk']]
+        filtered_models = [m for m in models if m['in_db'] and not m['in_place'] and not m['git_lfs']]
     elif st.session_state.filter == 'orphaned':
         filtered_models = [m for m in models if not m['in_db']]
     elif st.session_state.filter == 'lfs':
@@ -290,10 +297,12 @@ def main():
             status = "⚠️ Not in DB"
         elif model['git_lfs']:
             status = "⚠️ LFS Pointer"
-        elif not model['on_disk']:
-            status = "❌ Missing"
         elif model['in_place']:
+            # File exists at the path (either in-place or in models folder)
             status = "✅ OK"
+        elif not model['on_disk']:
+            # File doesn't exist and no corresponding folder
+            status = "❌ Missing"
         else:
             status = "⚠️ Check"
 
