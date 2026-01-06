@@ -1,0 +1,10 @@
+# Sudoers for invokecleanup (Claude-managed)
+# Created: 2026-01-06 21:28:00
+# Project: /home/dev/work/media/invokedev/invokecleanup
+# Purpose: Enable package installation for building PyArrow from source
+# Task: Installing cmake and Apache Arrow libraries to rebuild pyarrow with GCC 15.2.1 compatibility
+#
+# Install: sudo cp claude-invokecleanup /etc/sudoers.d/claude-invokecleanup
+# Remove: sudo rm /etc/sudoers.d/claude-invokecleanup
+
+dev ALL=(ALL) NOPASSWD: /usr/bin/pacman *

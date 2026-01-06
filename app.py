@@ -140,7 +140,7 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
     cursor = conn.cursor()
 
     # Query all models with hash for duplicate detection
-    cursor.execute("SELECT id, type, path, name, hash FROM models")
+    cursor.execute("SELECT id, type, path, name, hash, created_at FROM models")
     rows = cursor.fetchall()
 
     # Scan the models folder
@@ -149,13 +149,13 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
     # Build hash map for duplicate detection
     hash_counts = {}
     for row in rows:
-        model_hash = row[4] if len(row) > 4 else None
+        model_hash = row[4] if len(row) > 4 else None  # hash is 5th field (index 4)
         if model_hash:
             hash_counts[model_hash] = hash_counts.get(model_hash, 0) + 1
 
     models = []
     for row in rows:
-        model_id, model_type, model_path, model_name, model_hash = row
+        model_id, model_type, model_path, model_name, model_hash, created_at = row
 
         # Handle both absolute and relative paths
         path_obj = Path(model_path)
@@ -191,6 +191,7 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
             'size_formatted': format_size(file_size),
             'hash': hash_value,
             'content_hash': model_hash,  # BLAKE3 hash for duplicate detection
+            'created_at': created_at,
             'in_place': in_place,
             'symlink': is_symlink,
             'git_lfs': is_lfs_pointer,
@@ -313,22 +314,13 @@ def perform_duplicate_removal(duplicate_models: List[Dict], db_path: Path, data_
 
     for content_hash, models_in_group in groups.items():
         try:
-            # Priority rules:
-            # 1. Keep non-in-place files (UUID-based models)
-            # 2. If multiple non-in-place, keep first one
-            # 3. If all in-place, keep first one
+            # Priority rule: Keep the oldest entry (first imported)
+            # Sort by created_at timestamp (oldest first)
+            sorted_models = sorted(models_in_group, key=lambda m: m.get('created_at', ''))
 
-            non_inplace = [m for m in models_in_group if m['hash'] != 'N/A']
-            inplace = [m for m in models_in_group if m['hash'] == 'N/A']
-
-            if non_inplace:
-                # Keep first non-in-place, remove rest
-                to_keep = non_inplace[0]
-                to_remove = non_inplace[1:] + inplace
-            else:
-                # All in-place, keep first
-                to_keep = inplace[0]
-                to_remove = inplace[1:]
+            # Keep oldest, remove rest
+            to_keep = sorted_models[0]
+            to_remove = sorted_models[1:]
 
             kept_count += 1
 
