@@ -4,155 +4,142 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repository contains `invokecleanup.fish`, a Fish shell function for cleaning up InvokeAI's models database. It identifies and removes invalid model entries based on multiple criteria (missing files, broken symlinks, unknown types, empty folders, git-lfs pointer files) and optionally moves the associated model folders to a `deleted-models` directory.
+InvokeAI Model Cleanup is a Streamlit web application for managing and cleaning up InvokeAI's models database. It provides a visual interface to identify problematic models (missing files, orphaned entries, git-lfs pointers, duplicates) and perform bulk operations like deletion or in-place import preparation.
 
-**Target Platform**: Garuda Linux (Arch-based) with Fish shell
+**Target Platform**: Garuda Linux (Arch-based) with Python 3.12
+
+## Quick Start
+
+```fish
+source .envrc        # Activate virtual environment
+run                  # Start Streamlit app (localhost:8501)
+stop                 # Stop Streamlit app
+```
+
+## Configuration
+
+**config.yaml** - Single configuration file:
+```yaml
+invokeai_data_path: /mnt/llm/hub/invokeai_data
+```
+
+The app expects this directory structure under `invokeai_data_path`:
+- `databases/invokeai.db` - SQLite database
+- `models/` - Model files organized by UUID folders
+- `review/` - Created by app for deleted models (safe review before permanent deletion)
+- `in-place/` - Created by app for in-place import symlinks
 
 ## Development Environment
 
 ### Virtual Environment
 
-The project uses `uv` for Python virtual environment management, though the main script is pure Fish shell.
+- **Activate**: `source .envrc`
+- **Create new**: `mkenv` (uses uv with Python 3.12.10)
+- **Remove**: `rmenv`
+- **Install deps**: `install`
 
-- **Activate environment**: `source .envrc` (automatically activates `.venv`)
-- **Environment setup**: Handled by `.envrc` and `.salias`
-- **Python version**: 3.12.10
+### Aliases (from .salias)
 
-### Environment Management Aliases
-
-From `.salias`:
-- `rmenv` - Remove virtual environment and related files
-- `mkenv` - Create new uv environment with Python 3.12.10
-- `install` - Install/upgrade pip in the environment
-
-## Testing the Function
-
-### Prerequisites
-
-You need an InvokeAI installation with:
-- `invokeai.db` SQLite database in the working directory
-- Model files referenced in the database
-
-### Running the Function
-
-1. **Load the function into your Fish shell**:
-   ```fish
-   source invokecleanup.fish
-   ```
-
-2. **Run with different modes**:
-   ```fish
-   # Scan all models for issues
-   invokecleanup
-
-   # Find only models with type 'unknown'
-   invokecleanup --unknowns
-
-   # Filter models by name (case-insensitive)
-   invokecleanup "sdxl"
-   ```
-
-3. **Interactive confirmation**: The function will show a summary and ask for confirmation before making any deletions
-
-### Test Database Setup
-
-To test without a real InvokeAI installation, you can create a minimal test database:
-
-```fish
-# Create a test database
-sqlite3 invokeai.db "CREATE TABLE models (id TEXT PRIMARY KEY, type TEXT, path TEXT, name TEXT)"
-
-# Add some test entries
-sqlite3 invokeai.db "INSERT INTO models VALUES ('test-1', 'unknown', '/nonexistent/path', 'Test Model 1')"
-sqlite3 invokeai.db "INSERT INTO models VALUES ('test-2', 'lora', '/another/missing', 'Test Model 2')"
-```
-
-## Code Architecture
-
-### Main Flow
-
-1. **Argument parsing** (lines 6-14): Determines operation mode (`--unknowns` flag or filter string)
-2. **Database validation** (lines 20-24): Checks for `invokeai.db` in current directory
-3. **Model scanning** (lines 38-150): Two paths:
-   - Fast path for `--unknowns`: Direct SQL query for type='unknown'
-   - Full scan: Iterates through all models (or filtered subset) with multiple checks
-4. **Git-LFS detection** (lines 87-100): Identifies incomplete downloads (pointer files < 1KB)
-5. **Validation checks** (lines 102-141): Progressive checks for invalidity
-6. **Interactive summary** (lines 191-231): Groups by reason, shows examples, requests confirmation
-7. **Deletion execution** (lines 234-277): Removes DB records and moves folders to `deleted-models/`
-
-### Validation Checks (in order)
-
-1. **Git-LFS pointer detection**: Files < 1KB starting with "version https://git-lfs.github.com" (informational, not deleted)
-2. **Name filter match**: If filter string provided, matches against model name
-3. **Unknown type**: Model type is 'unknown'
-4. **Path existence**: Model path doesn't exist
-5. **Broken symlink**: Symlink target doesn't exist
-6. **Empty parent folder**: Model's parent directory is empty
-
-### Key Implementation Details
-
-- **Database**: Uses `sqlite3` CLI for all database operations (SELECT, DELETE)
-- **Temporary files**: Creates three temp files for tracking:
-  - `$temp_to_delete`: Models marked for deletion
-  - `$temp_summary`: Reasons for deletion (for counting)
-  - `$temp_lfs_pointers`: Git-LFS pointer files (informational only)
-- **Progress indicators**: Shows progress every 50 models during full scans
-- **Folder management**: Uses `dirname` and `basename` to extract folder paths, moves entire model folders (not individual files)
-- **Timestamp handling**: Adds timestamp to destination folder if it already exists
+| Alias | Command | Purpose |
+|-------|---------|---------|
+| `run` | `streamlit run app.py` | Start the web UI |
+| `stop` | `pkill -f streamlit` | Stop the web UI |
+| `mkenv` | `mkuv $ENV_NAME 3.12.10` | Create virtual environment |
+| `rmenv` | `rm -rf .envrc $ENV_NAME uv.lock` | Remove environment |
+| `install` | `uv pip install -r requirements.txt` | Install dependencies |
 
 ## Dependencies
 
-- **Fish shell**: Required (v3.0+)
-- **sqlite3**: For database queries
-- **Standard Unix tools**: `stat`, `head`, `cut`, `grep`, `wc`, `sort`, `uniq`, `dirname`, `basename`, `mktemp`, `date`, `mv`
-- **Fish built-ins**: `string`, `math`, `set_color`, `read`
+From requirements.txt:
+- `streamlit` - Web UI framework
+- `pyyaml` - Configuration parsing
+- `streamlit-aggrid` - Interactive data grid
+- `pyperclip` - Clipboard support
+
+Also uses (from standard library or transitive):
+- `sqlite3` - Database access
+- `pandas` - Data manipulation (via streamlit-aggrid)
+
+## Architecture
+
+### app.py Structure
+
+| Lines | Function | Purpose |
+|-------|----------|---------|
+| 14-24 | `load_config()` | Load and validate config.yaml |
+| 27-41 | `get_database_path()` | Resolve database path from config |
+| 44-58 | `format_size()` | Format bytes to M/G display |
+| 61-75 | `is_git_lfs_pointer()` | Detect incomplete LFS downloads |
+| 78-86 | `get_file_size()` | Safe file size getter |
+| 89-111 | `extract_hash_from_path()` | Extract UUID from model path |
+| 114-134 | `scan_models_folder()` | Scan filesystem for model files |
+| 137-232 | `get_models_from_db()` | Load models with filesystem cross-reference |
+| 235-290 | `perform_inplace_import()` | Create symlinks for re-import |
+| 293-359 | `perform_duplicate_removal()` | Remove duplicate models (keep oldest) |
+| 362-458 | `perform_deletion()` | Delete models and move files to review |
+| 461-744 | `main()` | Streamlit UI and interaction logic |
+
+### Model Categories
+
+| Category | Description | Action Available |
+|----------|-------------|------------------|
+| **Total** | All models in database | View only |
+| **OK** | Valid models with files present | View only |
+| **Missing** | DB entry exists but file missing | Delete, In-place import |
+| **Orphaned** | File exists but no DB entry | Delete, In-place import |
+| **LFS** | Git-LFS pointer files (incomplete downloads) | Delete, In-place import |
+| **Duplicates** | Same BLAKE3 hash as another model | Remove duplicates |
+| **In-place** | Models imported via in-place (no UUID folder) | Delete, In-place import |
+
+### Data Flow
+
+1. **Startup**: Load config.yaml, connect to invokeai.db
+2. **Scan**: Query all models from DB, scan models/ folder for orphans
+3. **Cross-reference**: Match DB entries to filesystem, detect issues
+4. **Display**: Show categorized models in AgGrid with clickable filters
+5. **Action**: User selects category and action, app modifies DB and moves files
+
+### Key Implementation Details
+
+- **UUID detection**: Models stored in `models/{uuid}/model.safetensors` format
+- **In-place detection**: Models with `hash == 'N/A'` are in-place imports (external files)
+- **Duplicate detection**: Uses BLAKE3 content hash from DB (not UUID)
+- **Safe deletion**: Files moved to `review/` folder, not permanently deleted
+- **Clipboard**: Click row to copy model name (uses pyperclip)
+
+## File Structure
+
+```
+invokecleanup/
+├── app.py                        # Main Streamlit application
+├── config.yaml                   # InvokeAI data path configuration
+├── requirements.txt              # Python dependencies
+├── CLAUDE.md                     # This file
+├── .salias                       # Shell aliases (run, stop, etc.)
+├── .envrc                        # Virtual environment activation
+├── .venv/                        # Python virtual environment
+└── invokecleanup.fish-old-ignore # Deprecated CLI version (ignore)
+```
 
 ## Common Modifications
 
-### Adding New Validation Checks
+### Adding a New Model Category
 
-Add new checks in the validation section (lines 115-141) following this pattern:
+1. Add count calculation in `main()` around line 498-506
+2. Add filter button in the columns section (lines 509-538)
+3. Add filter logic in the filtering section (lines 541-554)
+4. Add action handling if needed (lines 693-740)
 
-```fish
-if test -z "$reason"
-    # Your check condition here
-    if test <condition>
-        set reason "Your reason description"
-    end
-end
-```
+### Changing Deletion Behavior
 
-### Changing Database Schema
+Modify `perform_deletion()` (lines 362-458):
+- Change destination folder: modify `review_folder` variable
+- Skip file moving: remove the shutil.move calls
+- Add logging: insert logging calls in the try block
 
-If InvokeAI changes its schema, update the SQL queries:
-- Line 41-42: SELECT query for --unknowns mode
-- Line 62: SELECT query for filtered models
-- Line 65: SELECT query for all models
-- Line 246: DELETE query
+### Adding New Model Metadata
 
-### Modifying Deletion Behavior
-
-The deletion logic (lines 234-277) can be modified to:
-- Skip folder moving: Comment out lines 252-275
-- Change destination: Modify `$DELETED_DIR` variable (line 18)
-- Add database backup: Add backup step before deletions
-
-## Installation for System-Wide Use
-
-To make this function available system-wide:
-
-1. Copy to Fish functions directory:
-   ```fish
-   cp invokecleanup.fish ~/.config/fish/functions/
-   ```
-
-2. Or source it in your `config.fish`:
-   ```fish
-   echo "source /home/dev/work/media/invokecleanup/invokecleanup.fish" >> ~/.config/fish/config.fish
-   ```
-
-3. Reload Fish configuration:
-   ```fish
-   source ~/.config/fish/config.fish
-   ```
+1. Add column to SQL query in `get_models_from_db()` (line 143)
+2. Add to model dict (lines 185-201)
+3. Add column to table_data in `main()` (lines 566-592)
+4. Configure column in GridOptionsBuilder (lines 608-611)
