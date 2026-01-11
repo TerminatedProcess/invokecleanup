@@ -166,12 +166,15 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
         # Get file size
         file_size = get_file_size(path_obj)
 
-        # Check if it's a symbolic link
-        is_symlink = path_obj.is_symlink() if path_obj.exists() else False
+        # Check if it's a symbolic link (works even if target doesn't exist)
+        is_symlink = path_obj.is_symlink()
 
-        # Check if model exists (in-place)
-        # Could be a file (ControlNet, LoRA) or folder (diffusers main model)
-        in_place = path_obj.exists() and (path_obj.is_file() or path_obj.is_dir())
+        # Check if model file/folder actually exists
+        # For symlinks, this checks if the target exists
+        file_exists = path_obj.exists() and (path_obj.is_file() or path_obj.is_dir())
+
+        # In-place model = symlink that points to a real file
+        is_inplace = is_symlink and file_exists
 
         # Check if it's a git-lfs pointer
         is_lfs_pointer = is_git_lfs_pointer(path_obj)
@@ -192,8 +195,9 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
             'hash': hash_value,
             'content_hash': model_hash,  # BLAKE3 hash for duplicate detection
             'created_at': created_at,
-            'in_place': in_place,
+            'file_exists': file_exists,
             'symlink': is_symlink,
+            'is_inplace': is_inplace,
             'git_lfs': is_lfs_pointer,
             'in_db': True,
             'on_disk': hash_value in models_on_disk,
@@ -221,8 +225,9 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
             'size_formatted': format_size(file_size),
             'hash': uuid,
             'content_hash': None,
-            'in_place': True,
+            'file_exists': True,
             'symlink': is_symlink,
+            'is_inplace': is_symlink,  # orphaned symlinks are in-place
             'git_lfs': is_lfs_pointer,
             'in_db': False,
             'on_disk': True,
@@ -497,13 +502,13 @@ def main():
 
     # Calculate statistics
     total_models = len(models)
-    missing_files = sum(1 for m in models if m['in_db'] and not m['in_place'] and not m['git_lfs'])
+    missing_files = sum(1 for m in models if m['in_db'] and not m['file_exists'] and not m['git_lfs'])
     orphaned_files = sum(1 for m in models if not m['in_db'])
     lfs_pointers = sum(1 for m in models if m['git_lfs'])
     duplicate_models = sum(1 for m in models if m['is_duplicate'])
-    # In-place models: UUID shows "In-place" (hash == 'N/A')
-    inplace_models = sum(1 for m in models if m['in_db'] and m['hash'] == 'N/A')
-    ok_models = sum(1 for m in models if m['in_db'] and m['in_place'] and not m['git_lfs'] and not m['is_duplicate'])
+    # In-place models: symlinks pointing to real files
+    inplace_models = sum(1 for m in models if m['in_db'] and m['is_inplace'])
+    ok_models = sum(1 for m in models if m['in_db'] and m['file_exists'] and not m['git_lfs'] and not m['is_duplicate'])
 
     # Display compact summary with clickable buttons
     col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
@@ -539,9 +544,9 @@ def main():
 
     # Filter models based on selected filter
     if st.session_state.filter == 'ok':
-        filtered_models = [m for m in models if m['in_db'] and m['in_place'] and not m['git_lfs'] and not m['is_duplicate']]
+        filtered_models = [m for m in models if m['in_db'] and m['file_exists'] and not m['git_lfs'] and not m['is_duplicate']]
     elif st.session_state.filter == 'missing':
-        filtered_models = [m for m in models if m['in_db'] and not m['in_place'] and not m['git_lfs']]
+        filtered_models = [m for m in models if m['in_db'] and not m['file_exists'] and not m['git_lfs']]
     elif st.session_state.filter == 'orphaned':
         filtered_models = [m for m in models if not m['in_db']]
     elif st.session_state.filter == 'lfs':
@@ -549,7 +554,7 @@ def main():
     elif st.session_state.filter == 'duplicates':
         filtered_models = [m for m in models if m['is_duplicate']]
     elif st.session_state.filter == 'inplace':
-        filtered_models = [m for m in models if m['in_db'] and m['hash'] == 'N/A']
+        filtered_models = [m for m in models if m['in_db'] and m['is_inplace']]
     else:  # total
         filtered_models = models
 
@@ -572,8 +577,13 @@ def main():
         elif model['is_duplicate']:
             name = f"🔄 {name}"
 
-        # UUID (folder hash) - full value or "In-place" for external models
-        uuid_display = model['hash'] if model['hash'] != 'N/A' else 'In-place'
+        # UUID (folder hash) - show UUID, "Symlink" for in-place, or "External" for non-UUID paths
+        if model['hash'] != 'N/A':
+            uuid_display = model['hash']
+        elif model['is_inplace']:
+            uuid_display = 'Symlink'
+        else:
+            uuid_display = 'External'
 
         # BLAKE3 content hash - remove 'blake3:' prefix, show full hash
         content_hash = model.get('content_hash', '')
@@ -704,12 +714,20 @@ def main():
                 if st.session_state.filter == 'duplicates':
                     # Duplicates: Remove duplicates only
                     actions = [f"Remove duplicates"]
+                elif st.session_state.filter == 'missing':
+                    # Missing: Only delete (no file to import from)
+                    actions = [f"Delete ({len(filtered_models)} models)"]
+                elif st.session_state.filter == 'orphaned':
+                    # Orphaned: In-place import (add to DB) or Delete (remove file)
+                    actions = [f"In-place import ({len(filtered_models)} models)", f"Delete ({len(filtered_models)} models)"]
+                elif st.session_state.filter == 'lfs':
+                    # LFS pointers: Only delete (incomplete downloads)
+                    actions = [f"Delete ({len(filtered_models)} models)"]
                 elif st.session_state.filter == 'inplace':
-                    # In-place: In-place import OR Delete
-                    actions = [f"In-place import ({len(filtered_models)} models)", f"Delete ({len(filtered_models)} models)"]
+                    # In-place: Delete only (already imported as symlinks)
+                    actions = [f"Delete ({len(filtered_models)} models)"]
                 else:
-                    # Missing, Orphaned, LFS: In-place import OR Delete
-                    actions = [f"In-place import ({len(filtered_models)} models)", f"Delete ({len(filtered_models)} models)"]
+                    actions = [f"Delete ({len(filtered_models)} models)"]
 
                 action = st.selectbox("Actions", actions, label_visibility="collapsed")
 
@@ -730,10 +748,16 @@ def main():
             if not is_total and not is_ok and has_models:
                 if st.session_state.filter == 'duplicates':
                     st.caption("Intelligently remove duplicate models")
+                elif st.session_state.filter == 'missing':
+                    st.caption("Remove DB entries for missing files")
+                elif st.session_state.filter == 'orphaned':
+                    st.caption("Import orphaned files or delete them")
+                elif st.session_state.filter == 'lfs':
+                    st.caption("Remove incomplete LFS downloads")
                 elif st.session_state.filter == 'inplace':
-                    st.caption("In-place import or delete in-place models")
+                    st.caption("Remove symlinked models from DB")
                 else:
-                    st.caption("In-place import or delete models")
+                    st.caption("Delete selected models")
             elif not has_models and not is_total and not is_ok:
                 st.caption(f"No {st.session_state.filter} models found")
             else:
