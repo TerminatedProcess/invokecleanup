@@ -205,8 +205,11 @@ def get_models_from_db(db_path: Path, models_path: Path) -> List[Dict]:
         })
 
         # Remove from disk dict so we can find orphans later
+        # Check both: UUID extracted from path AND model_id (which is also a UUID)
         if hash_value in models_on_disk:
             models_on_disk.pop(hash_value)
+        if model_id in models_on_disk:
+            models_on_disk.pop(model_id)
 
     conn.close()
 
@@ -301,8 +304,10 @@ def perform_duplicate_removal(duplicate_models: List[Dict], db_path: Path, data_
     from datetime import datetime
     from collections import defaultdict
 
-    review_folder = data_path / "review"
-    review_folder.mkdir(exist_ok=True)
+    # Create timestamped batch folder to avoid overwrites
+    batch_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    review_folder = data_path / "review" / batch_timestamp
+    review_folder.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -341,12 +346,9 @@ def perform_duplicate_removal(duplicate_models: List[Dict], db_path: Path, data_
                     # In-place model - move the actual file/folder
                     folder_to_move = model_path
 
-                # Move to review folder with timestamp
+                # Move to review folder
                 if folder_to_move.exists():
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    dest_name = f"{folder_to_move.name}_{timestamp}"
-                    dest_path = review_folder / dest_name
-
+                    dest_path = review_folder / folder_to_move.name
                     shutil.move(str(folder_to_move), str(dest_path))
 
                 # Delete from database
@@ -369,8 +371,10 @@ def perform_deletion(models_to_delete: List[Dict], filter_type: str, db_path: Pa
     import shutil
     from datetime import datetime
 
-    review_folder = data_path / "review"
-    review_folder.mkdir(exist_ok=True)
+    # Create timestamped batch folder to avoid overwrites
+    batch_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    review_folder = data_path / "review" / batch_timestamp
+    review_folder.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -405,14 +409,17 @@ def perform_deletion(models_to_delete: List[Dict], filter_type: str, db_path: Pa
             model_id = model['id']
             model_path = model['path']
 
-            # Skip orphaned models (not in DB)
+            # Handle orphaned models (not in DB) - just move the file/folder
             if not model['in_db']:
-                # Just move the file/folder
                 path_obj = Path(model_path)
                 if path_obj.exists():
-                    dest_name = f"{path_obj.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                    dest_path = review_folder / dest_name
-                    shutil.move(str(path_obj), str(dest_path))
+                    # For orphans, move the UUID folder (parent of the file)
+                    if path_obj.is_file() and path_obj.parent.name != 'models':
+                        item_to_move = path_obj.parent
+                    else:
+                        item_to_move = path_obj
+                    dest_path = review_folder / item_to_move.name
+                    shutil.move(str(item_to_move), str(dest_path))
                     moved_count += 1
                 continue
 
@@ -442,10 +449,7 @@ def perform_deletion(models_to_delete: List[Dict], filter_type: str, db_path: Pa
                         # Folder (diffusers format)
                         item_to_move = path_obj
 
-                    # Create unique name with timestamp
-                    dest_name = f"{item_to_move.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                    dest_path = review_folder / dest_name
-
+                    dest_path = review_folder / item_to_move.name
                     shutil.move(str(item_to_move), str(dest_path))
                     moved_count += 1
 
